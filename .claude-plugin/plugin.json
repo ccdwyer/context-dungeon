@@ -8,5 +8,9 @@
     "url": "https://github.com/ccdwyer"
   },
   "repository": "https://github.com/ccdwyer/context-dungeon",
-  "license": "MIT"
+  "license": "MIT",
+  "homepage": "https://github.com/ccdwyer/context-dungeon",
+  "supportUrl": "https://github.com/ccdwyer/context-dungeon/issues",
+  "documentationUrl": "https://github.com/ccdwyer/context-dungeon#readme",
+  "privacyPolicyUrl": "https://github.com/ccdwyer/context-dungeon/blob/main/PRIVACY.md"
 }
