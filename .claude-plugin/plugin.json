@@ -1,0 +1,11 @@
+{
+  "name": "context-dungeon",
+  "version": "0.1.0",
+  "description": "A roguelike pane played by your real session: context is HP, errors spawn monsters, green tests slay them, commits open chests, PRs are floor bosses",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Chris Dwyer",
+    "url": "https://github.com/ccdwyer"
+  },
+  "repository": "https://github.com/ccdwyer/context-dungeon"
+}

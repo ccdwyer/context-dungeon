@@ -1,0 +1,13 @@
+{
+  "name": "context-dungeon",
+  "owner": {
+    "name": "Chris Dwyer"
+  },
+  "plugins": [
+    {
+      "name": "context-dungeon",
+      "source": "./",
+      "description": "A roguelike pane played by your real session: context is HP, errors spawn monsters, green tests slay them, commits open chests, PRs are floor bosses"
+    }
+  ]
+}
