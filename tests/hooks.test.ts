@@ -94,3 +94,32 @@ test('a denied call is ignored and passes through untouched', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /⚔/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a finished run is stored under its own key; a legacy tally and other runs are kept', async ($, on) => {
+  mock.clock(on, { now: 1000 })
+  const legacy = { runs: 4, kills: 9, chests: 0, bosses: 0, wipes: 0, bestFloor: 1, bestLevel: 2, fame: [] }
+  const other = { floor: 1, level: 1, kills: 2, chests: 0, bosses: 0, fate: 'retired to the inn', at: 500 }
+  // A store the test can look into: the plugin only ever adds keys.
+  const store = new Map<string, unknown>([['lifetime', legacy], ['run:500-other', other]])
+  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_$, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_$, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('tool.call', () => ({ result: { gitOperation: { commit: { kind: 'committed' } } }, text: '' }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  await $.session.start({ cwd: '/tmp', surface: null, isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'git commit -m x' })
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 's', resume: { id: 's' } } as Parameters<typeof $.session.end>[0])
+  const runs = [...store.keys()].filter(k => k.startsWith('run:'))
+  expect(runs.length).toBe(2)
+  expect(store.get('lifetime')).toEqual(legacy)
+  const mine = runs.map(k => store.get(k) as { chests: number }).find(f => f.chests === 1)
+  expect(mine).toBeDefined()
+})

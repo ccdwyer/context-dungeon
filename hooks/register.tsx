@@ -4,12 +4,15 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Fame, Lifetime, Run } from '../types'
 import {
   fameOf, freshLifetime, freshRun, hasProgress, isCheckCommand, isExcusedFailure, onBonfire, onBossAppears,
-  onCommit, onContext, onEdit, onFailure, onFloorCleared, onPass, onTurn, record, xpToNext,
+  onCommit, onContext, onEdit, onFailure, onFloorCleared, onPass, onTurn, tally, xpToNext,
 } from './game'
 import type { Step } from './game'
 
 const PANE = 'context-dungeon'
+// The old single-key tally, read but never written again.
 const LIFETIME_KEY = 'lifetime'
+// Each finished run is stored under its own key with this prefix.
+const RUN_PREFIX = 'run:'
 const LOG_KEEP = 60
 
 const run = atom({ plugin: 'context-dungeon', key: 'run' } as const, null)
@@ -41,18 +44,36 @@ async function apply($: Engine, transition: (r: Run) => Step, now = 0) {
   if (fame !== undefined) await remember($, fame)
 }
 
-// Only a finished run touches the store. Each write re-reads the stored tally so a
-// second session's finished runs are added to, not overwritten; writes from this
-// session queue one behind another.
-let storing: Promise<void> = Promise.resolve()
-function remember($: Engine, fame: Fame): Promise<void> {
-  storing = storing.then(async () => {
-    const stored = ((await $.store.get(LIFETIME_KEY)) as Lifetime | undefined) ?? freshLifetime()
-    const life = record(stored, fame)
-    await $.store.set(LIFETIME_KEY, life)
+// A stored run counts only when every field the tally sums is there.
+const isFame = (v: unknown): v is Fame => {
+  if (typeof v !== 'object' || v === null) return false
+  const f = v as Record<string, unknown>
+  return ['floor', 'level', 'kills', 'chests', 'bosses', 'at'].every(k => typeof f[k] === 'number' && Number.isFinite(f[k])) && typeof f.fate === 'string'
+}
+
+// The lifetime tally: the old single-key tally plus every stored run.
+async function loadLifetime($: Engine): Promise<Lifetime> {
+  const base = (await $.store.get(LIFETIME_KEY)) as Lifetime | undefined
+  const runs: Fame[] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(RUN_PREFIX)) continue
+    const value = await $.store.get(key)
+    if (isFame(value)) runs.push(value)
+  }
+  return tally(base, runs)
+}
+
+// Only a finished run touches the store, and only by adding a key of its own:
+// sessions ending at the same moment each add theirs, so no run is lost.
+async function remember($: Engine, fame: Fame): Promise<void> {
+  try {
+    const id = `${RUN_PREFIX}${fame.at}-${Math.random().toString(36).slice(2, 10)}`
+    await $.store.set(id, fame)
+    const life = await loadLifetime($)
     await update($, lifetime, () => life)
-  }).catch(() => undefined)
-  return storing
+  } catch {
+    // The hall of fame is optional.
+  }
 }
 
 async function openPane($: Engine) {
@@ -101,8 +122,8 @@ export const register: Register = on => {
         description: 'Context Dungeon: open the dungeon pane (args: fame, ticker)',
         immediate: true,
       })
-      const stored = (await $.store.get(LIFETIME_KEY)) as Lifetime | undefined
-      if (stored !== undefined) await update($, lifetime, () => stored)
+      const life = await loadLifetime($)
+      await update($, lifetime, () => life)
       const now = await $.clock.now()
       await update($, run, cur => cur ?? freshRun(now))
     } catch {
@@ -205,12 +226,17 @@ export const register: Register = on => {
   // /clear scatters the party: the next session's dungeon starts fresh.
   on('session.end', async ($, e, next) => {
     try {
-      const r = await read($, run)
+      // Take the run and clear it in one step, so a tool call finishing meanwhile cannot be lost or revived.
+      let ended: Run | null = null
+      await update($, run, cur => {
+        ended = cur
+        return null
+      })
+      await update($, log, () => [])
+      const r = ended as Run | null
       if (r !== null && hasProgress(r)) {
         await remember($, fameOf(r, e.reason === 'clear' ? 'scattered by /clear' : 'retired to the inn', await $.clock.now()))
       }
-      await update($, run, () => null)
-      await update($, log, () => [])
     } catch {
       // Ignore.
     }

@@ -36,7 +36,7 @@ export const freshLifetime = (): Lifetime => ({
 })
 
 // Whether a run did anything worth remembering. Passive turn XP is not an adventure.
-export const hasProgress = (r: Run) => r.kills > 0 || r.chests > 0 || r.bosses > 0 || r.floor > 1
+export const hasProgress = (r: Run) => r.kills > 0 || r.chests > 0 || r.bosses > 0 || r.floor > 1 || r.foe?.isBoss === true
 
 // A small stable hash, so the same error always summons the same creature.
 export function pick<T>(list: readonly T[], seed: string): T {
@@ -120,6 +120,8 @@ export function onPass(run: Run, text: string, seed: string): Step {
     lines.unshift(`✓ ${hero(run, seed)} keeps watch. The checks are green.`)
     return { run: next, lines }
   }
+  // A boss already held at 1 HP waits for the merge; another green run changes nothing.
+  if (run.foe.isBoss === true && run.foe.hp <= 1) return { run, lines }
   const damage = !isClean ? 1 : run.foe.isBoss === true ? Math.ceil(run.foe.maxHp / 2) : run.foe.hp
   const foe = { ...run.foe, hp: run.foe.hp - damage }
   if (foe.hp > 0) {
@@ -194,7 +196,8 @@ export function onContext(run: Run, remaining: number, now: number): Step {
   return {
     run: { ...freshRun(now, hp), isExhausted: true },
     lines: [`✝ The party has fallen on floor ${run.floor}. Context exhausted.`, `  A new party gathers at the entrance.`],
-    fame: fameOf(run, 'wiped out (context exhausted)', now),
+    // Like leaving, a wipe joins the hall of fame only if the run did something.
+    fame: hasProgress(run) ? fameOf(run, 'wiped out (context exhausted)', now) : undefined,
   }
 }
 
@@ -227,6 +230,13 @@ export function record(life: Lifetime, fame: Fame): Lifetime {
     bestLevel: Math.max(life.bestLevel, fame.level),
     fame: ranked,
   }
+}
+
+// The lifetime tally: an old single-key tally (if any) plus every run stored under
+// its own key. Each session only ever adds keys, so two sessions ending together
+// cannot overwrite each other's runs. Runs are folded oldest first.
+export function tally(base: Lifetime | undefined, runs: readonly Fame[]): Lifetime {
+  return [...runs].sort((a, b) => a.at - b.at || a.fate.localeCompare(b.fate)).reduce(record, base ?? freshLifetime())
 }
 
 // --- Reading shell lines -------------------------------------------------------
@@ -357,7 +367,7 @@ export function invocation(words: readonly string[]): { exe: string; args: strin
 // Flags that make a runner print, list or watch instead of running checks once.
 const NOT_A_RUN: Record<string, RegExp> = {
   jest: /^(--listTests|--showConfig|--watch|--watchAll|--init)$/,
-  vitest: /^(--watch|list|init)$/,
+  vitest: /^(--watch|-w|list|init|watch|dev)$/,
   mocha: /^(--watch|-w)$/,
   pytest: /^(--collect-only|--co|--fixtures|--markers)$/,
   rspec: /^(--dry-run|--init)$/,
@@ -381,8 +391,23 @@ function subcommand(args: string[]): { sub: string | undefined; rest: string[] }
   return { sub: args[i], rest: args.slice(i + 1) }
 }
 
+// After `--`, `-w` is a watch flag unless a number follows it (Jest's `-w 2` is workers).
+// `--watch` / `--watchAll`, alone or with a value that turns it on (`--watch=false` runs once).
+const isWatchOn = (a: string) => /^(--watch|--watchAll)(=(?!(false|0|off|no)$).*)?$/i.test(a)
+// Flags forwarded after `--` that make the runner list or dry-run instead of running.
+const FORWARDED_NOT_A_RUN = /^(--listTests|--list-tests|--list|--collect-only|--co|--dry-run|--showConfig)$/
+
+function passesWatch(args: string[]): boolean {
+  const at = args.indexOf('--')
+  if (at === -1) return false
+  const extra = args.slice(at + 1)
+  return extra.some((a, i) => isWatchOn(a) || FORWARDED_NOT_A_RUN.test(a) || (a === '-w' && !/^\d+$/.test(extra[i + 1] ?? '')))
+}
+
 function isCheckInvocation(exe: string, args: string[]): boolean {
   if (args.some(a => /^(--version|--help|-h)$/.test(a))) return false
+  // Watching never finishes a run, wherever the flag sits.
+  if (args.some(isWatchOn) || passesWatch(args)) return false
   if (RUNNERS.has(exe)) return !args.some(a => (NOT_A_RUN[exe] as RegExp).test(a))
   if (exe === 'ruff') return args[0] === 'check' && !args.includes('--fix')
   if (exe === 'biome') return ['check', 'lint', 'ci'].includes(args[0] ?? '') && !args.includes('--write')
@@ -391,13 +416,13 @@ function isCheckInvocation(exe: string, args: string[]): boolean {
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(exe)) {
     const { sub, rest } = subcommand(args)
     const task = sub === 'run' || sub === 'run-script' ? subcommand(rest).sub : sub
-    const extra = args.slice(args.indexOf('--') + 1)
-    if (args.includes('--') && extra.some(a => /^(--watch|--watchAll|-w)$/.test(a))) return false
     return /^(test|tests|typecheck|type-check|tsc|lint|check)(:[\w-]+)?$/.test(task ?? '')
   }
   if (['go', 'cargo', 'swift', 'dotnet', 'deno'].includes(exe)) {
     const { sub, rest } = subcommand(args)
-    return sub === 'test' && !(exe === 'go' && rest.includes('-c')) && !rest.includes('--no-run') && !rest.includes('--list')
+    // Compile-only and list-only modes print names and exit 0 without running anything.
+    const listing = rest.some(a => /^(--list|--list-tests|-list(=.*)?|--no-run)$/.test(a) || (exe === 'dotnet' && a === '-t'))
+    return sub === 'test' && !(exe === 'go' && rest.includes('-c')) && !listing
   }
   if (exe === 'node') return args.includes('--test') || (args[0] === '--run' && /^(test|tests|lint|typecheck)(:[\w-]+)?$/.test(args[1] ?? ''))
   if (/^python(\d+(\.\d+)?)?$/.test(exe)) {
@@ -406,8 +431,13 @@ function isCheckInvocation(exe: string, args: string[]): boolean {
     return (args[1] === 'pytest' || args[1] === 'mypy') && isCheckInvocation(args[1], args.slice(2))
   }
   if (exe === 'xcodebuild') return args.includes('test') || args.includes('test-without-building')
-  if (exe === 'gradle' || exe === 'gradlew') return args.some(a => /^(.*:)?(test|check|lint)([A-Z]\w*)?$/.test(a) && !/Classes$/.test(a))
-  if (exe === 'make') return /^(test|check|lint)$/.test(subcommand(args).sub ?? '')
+  if (exe === 'gradle' || exe === 'gradlew') return !args.some(a => a === '--dry-run' || a === '-m') && args.some(a => /^(.*:)?(test|check|lint)([A-Z]\w*)?$/.test(a) && !/Classes$/.test(a))
+  if (exe === 'make') {
+    // -n / --dry-run / --just-print / --recon print the recipe without running it.
+    // A short-option cluster (`-sn`, `-nk`) dry-runs too.
+    if (args.some(a => /^(--dry-run|--just-print|--recon|--question)$/.test(a) || /^-[a-zA-Z]*[nq][a-zA-Z]*$/.test(a))) return false
+    return /^(test|check|lint)$/.test(subcommand(args).sub ?? '')
+  }
   return false
 }
 
@@ -415,9 +445,18 @@ function isCheckInvocation(exe: string, args: string[]): boolean {
 const PREDICATES = new Set(['rg', 'grep', 'egrep', 'fgrep', 'ag', 'ack', 'fd', 'diff', 'cmp', 'test', '[', '[[', 'which', 'type', 'pgrep', 'false'])
 // A predicate that printed one of these hit a real error, not a negative answer.
 // Only the tools' own diagnostic lines count; diff hunks and matches are content.
-const DIAGNOSTIC = /^(fatal:|error:|usage:|(rg|grep|egrep|fgrep|diff|cmp|fd|jq|test|\[|which|pgrep)(: | error)|regex parse error)|integer expression expected|unary operator expected|No such file or directory|Permission denied/i
-const isContent = (line: string) => /^([+\-@ ]|diff --git|index |[^:\s]+:\d+:)/.test(line)
-const hasDiagnostic = (text: string) => text.split('\n').some(line => !isContent(line) && DIAGNOSTIC.test(line.trim()))
+const DIAGNOSTIC = /^(fatal:|error:|usage:|(rg|grep|egrep|fgrep|diff|cmp|fd|jq|test|\[|which|pgrep)(: | error)|regex parse error)|integer expression expected|unary operator expected|No such file or directory|Permission denied|command not found|: not found$/i
+// Diff and match lines are content. A leading space is a diff context line only
+// when the output is a diff; otherwise it is an indented diagnostic.
+const isDiff = (text: string) => /^(diff --git |@@ |--- |\+\+\+ )/m.test(text)
+// A shell's own complaint (`zsh:1: …`, `-bash: …`, `bash: line 0: …`) is always a diagnostic.
+const SHELL_DIAGNOSTIC = /^-?(ba|z|k|da|fi)?sh(:\d+)?: /
+const isContent = (line: string, diff: boolean) =>
+  (diff && /^([+\- ]|@@|diff --git|index )/.test(line)) || /^[^:\s]+:\d+:/.test(line)
+const hasDiagnostic = (text: string) => {
+  const diff = isDiff(text)
+  return text.split('\n').some(line => SHELL_DIAGNOSTIC.test(line) || (!isContent(line, diff) && DIAGNOSTIC.test(line.trim())))
+}
 
 function isPredicateInvocation(words: string[], exe: string, args: string[]): boolean {
   if (PREDICATES.has(exe)) return true
@@ -437,6 +476,13 @@ function isPredicateInvocation(words: string[], exe: string, args: string[]): bo
 export function isCheckCommand(command: string): boolean {
   const { words, isCompound } = parse(command)
   if (isCompound) return false
+  // `MAKEFLAGS=-n make test` dry-runs: the variable is dropped before the executable is found.
+  // Its value is short-option clusters (GNU make allows the first without a dash), or long options.
+  const makeflags = words.find(w => w.startsWith('MAKEFLAGS='))
+  if (makeflags !== undefined) {
+    const flags = makeflags.slice('MAKEFLAGS='.length).split(/\s+/)
+    if (flags.some((f, i) => /^--(dry-run|just-print|recon)$/.test(f) || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(f) || (i === 0 && /^[a-zA-Z]*n[a-zA-Z]*$/.test(f)))) return false
+  }
   const { exe, args } = invocation(words)
   return isCheckInvocation(exe, args)
 }

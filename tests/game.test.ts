@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   MAX_FOE_HP, errorKind, fameOf, freshLifetime, freshRun, hasProgress, isCheckCommand, isExcusedFailure, onBonfire,
-  onBossAppears, onCommit, onContext, onFailure, onFloorCleared, onPass, onTurn, record, reportsFailures,
+  onBossAppears, onCommit, onContext, onFailure, onFloorCleared, onPass, onTurn, record, reportsFailures, tally,
 } from '../hooks/game'
 
 test('errors name their monsters, never the command', async () => {
@@ -150,4 +150,73 @@ test('failures that are answers, or cannot be pinned on a command, are excused',
 test('a red report in an empty room earns nothing', async () => {
   const r = onPass(freshRun(0), 'FAIL src/a.test.ts', 's')
   expect(r.run.xp).toBe(0)
+})
+
+test('watch, dry-run and list-only runs are not checks', async () => {
+  for (const c of [
+    'vitest -w', 'vitest --watch', 'bun test --watch', 'yarn test --watch', 'pnpm test --watch', 'npm test --watchAll',
+    'node --test --watch', 'node --watch --test', 'node --run test -- --watch', 'deno test --watch', 'mocha --watch',
+    'gradle test --dry-run', './gradlew test -m', 'make --dry-run test', 'make -n test', 'make test -n', 'make --just-print test',
+    'go test -list .', 'go test -list=. ./...', 'swift test --list-tests', 'dotnet test --list-tests', 'cargo test -- --list',
+    'npm test -- -w',
+  ]) {
+    expect(isCheckCommand(c)).toBe(false)
+  }
+  for (const c of ['npm test -- -w 2', 'npm test -- --maxWorkers=2', 'pnpm -w test', 'make test', './gradlew test']) {
+    expect(isCheckCommand(c)).toBe(true)
+  }
+})
+
+test('a boss held at 1 HP is left alone by later green runs', async () => {
+  let fight = onBossAppears(freshRun(0), 's').run
+  for (let i = 0; i < 4; i += 1) fight = onPass(fight, 'all green', 's').run
+  expect(fight.foe?.hp).toBe(1)
+  const again = onPass(fight, 'all green', 's')
+  expect(again.lines).toEqual([])
+  expect(again.run.foe?.hp).toBe(1)
+})
+
+test('a wipe with nothing done is not remembered, but still resets the party', async () => {
+  let idle = freshRun(0)
+  for (let i = 0; i < 5; i += 1) idle = onTurn(idle).run
+  const wipe = onContext(idle, 1, 50)
+  expect(wipe.fame).toBeUndefined()
+  expect(wipe.run.level).toBe(1)
+  expect(wipe.run.isExhausted).toBe(true)
+})
+
+test('indented diagnostics and missing binaries are real errors; diff context is not', async () => {
+  expect(isExcusedFailure('test abc -eq 1', '  bash: test: abc: integer expression expected')).toBe(false)
+  expect(isExcusedFailure('rg TODO', 'zsh: command not found: rg')).toBe(false)
+  expect(isExcusedFailure('rg TODO', 'sh: 1: rg: not found')).toBe(false)
+  expect(isExcusedFailure('diff -u a b', '--- a\n+++ b\n@@ -1,2 +1,2 @@\n error: kept line\n-ok\n+new')).toBe(true)
+})
+
+test('lifetime totals are summed from separate runs, so no run is lost', async () => {
+  const a = fameOf({ ...freshRun(0), floor: 2, kills: 3 }, 'retired to the inn', 10)
+  const b = fameOf({ ...freshRun(0), kills: 1, chests: 2 }, 'wiped out (context exhausted)', 20)
+  const legacy = record(freshLifetime(), fameOf({ ...freshRun(0), kills: 5 }, 'retired to the inn', 1))
+  const both = tally(legacy, [b, a])
+  expect(both.runs).toBe(3)
+  expect(both.kills).toBe(9)
+  expect(both.chests).toBe(2)
+  expect(both.wipes).toBe(1)
+  expect(both.bestFloor).toBe(2)
+  expect(tally(undefined, [a, b])).toEqual(tally(undefined, [b, a]))
+})
+
+test('review round: clustered dry runs, forwarded list flags, watch=false, shell diagnostics, a boss fight is progress', async () => {
+  for (const c of ['make -sn test', 'make test -nk', 'MAKEFLAGS=-n make test', 'npm test -- --listTests', 'npm test -- --list-tests',
+    'node --run test -- --listTests', 'vitest watch', 'vitest dev', 'dotnet test -t']) {
+    expect(isCheckCommand(c)).toBe(false)
+  }
+  for (const c of ['jest --watch=false', 'vitest --watch=false', 'npm test -- --watchAll=false', 'make -s test', 'go test -timeout 30s ./...']) {
+    expect(isCheckCommand(c)).toBe(true)
+  }
+  expect(isExcusedFailure('rg TODO', 'zsh:1: command not found: rg')).toBe(false)
+  expect(isExcusedFailure('rg TODO', '-bash: rg: command not found')).toBe(false)
+  expect(isExcusedFailure('test abc -eq 1', '-bash: line 0: test: abc: integer expression expected')).toBe(false)
+  expect(isExcusedFailure('rg denied logs', 'logs/a.txt:3: Permission denied for user bob')).toBe(true)
+  const boss = onBossAppears(freshRun(0), 's').run
+  expect(hasProgress(boss)).toBe(true)
 })
