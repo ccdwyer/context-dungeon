@@ -19,7 +19,7 @@ const isTickerHidden = atom({ plugin: 'context-dungeon', key: 'isTickerHidden' }
 const view = atom({ plugin: 'context-dungeon', key: 'view' } as const, 'room')
 const lifetime = atom({ plugin: 'context-dungeon', key: 'lifetime' } as const, null)
 
-type $ = EngineInterface
+type Engine = EngineInterface
 type BashOutcome = {
   backgroundTaskId?: string
   gitOperation?: { commit?: { kind?: string }; pr?: { action?: string } }
@@ -28,7 +28,7 @@ type BashOutcome = {
 // Every change to the run is computed inside one atomic update, so overlapping
 // tool calls each land on the latest run instead of overwriting each other.
 // `now` is only needed when a run may start or end; the hot path skips the clock.
-async function apply($: $, transition: (r: Run) => Step, now = 0) {
+async function apply($: Engine, transition: (r: Run) => Step, now = 0) {
   let lines: string[] = []
   let fame: Fame | undefined
   await update($, run, cur => {
@@ -45,7 +45,7 @@ async function apply($: $, transition: (r: Run) => Step, now = 0) {
 // second session's finished runs are added to, not overwritten; writes from this
 // session queue one behind another.
 let storing: Promise<void> = Promise.resolve()
-function remember($: $, fame: Fame): Promise<void> {
+function remember($: Engine, fame: Fame): Promise<void> {
   storing = storing.then(async () => {
     const stored = ((await $.store.get(LIFETIME_KEY)) as Lifetime | undefined) ?? freshLifetime()
     const life = record(stored, fame)
@@ -55,7 +55,7 @@ function remember($: $, fame: Fame): Promise<void> {
   return storing
 }
 
-async function openPane($: $) {
+async function openPane($: Engine) {
   try {
     const opened = await $.ui.open({ id: PANE, title: 'Context Dungeon' })
     await update($, isPaneOpen, () => opened.isPlaced)
@@ -114,7 +114,7 @@ export const register: Register = on => {
   on('command.run', { command: 'dungeon' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'ticker') {
-      const hidden = await update($, isTickerHidden, h => !h)
+      const hidden = await update($, isTickerHidden, was => !was)
       return { text: `Context Dungeon: ticker ${hidden ? 'hidden' : 'shown'}.` }
     }
     await update($, view, () => (arg === 'fame' ? 'fame' : 'room'))
