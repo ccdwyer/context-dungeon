@@ -47,3 +47,26 @@ The mod only watches. It never blocks or rewrites a tool call, and it ignores su
 claude plugin validate .
 claude plugin test .
 ```
+
+## What it hooks
+
+Events this mod hooks, as `claude plugin validate` reads the module:
+
+- `session.start`
+- `command.run{command=dungeon}`
+- `ui.close{id=context-dungeon}`
+- `tool.call`
+- `turn.complete`
+- `session.compact`
+- `session.end`
+- `ui.render{component=Pane`
+- `requestId=context-dungeon}`
+- `ui.render{component=AbovePrompt}`
+
+Engine calls it makes: `$.clock.now`, `$.command.register`, `$.session.usage`, `$.state.get`, `$.state.set`, `$.store.get`, `$.store.set (via remember)`, `$.ui.open (via openPane)`, `$.ui.resolve`, `$.ui.toast (via openPane)`.
+
+A `tool.call` hook sits in the middle of every tool call: it can see the call, refuse it, or add context to its result. This mod uses that only for the behaviour described above.
+
+## License
+
+MIT
